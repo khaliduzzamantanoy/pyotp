@@ -1,15 +1,18 @@
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for
+from flask import Flask, request, jsonify, abort, redirect
 import random
 import time
 import re
-import queue # To store pending OTP requests for the MicroPython device
+import queue
+import hashlib
+import secrets
+from datetime import datetime
+import json
 
 app = Flask(__name__)
 
 # In-memory storage for OTPs: {phone_number: (otp_code, expiry_timestamp)}
 otp_store = {}
 # Queue for MicroPython device to pull pending OTP send instructions
-# Each item: {'phone_number': '...', 'otp_code': '...'}
 pending_otp_sends = queue.Queue()
 
 # OTP expiry time in seconds (2 minutes)
@@ -17,6 +20,21 @@ OTP_EXPIRY_SECONDS = 120
 
 # Regex for basic Bangladesh phone number validation (starting with 01 and 11 digits)
 BD_PHONE_REGEX = re.compile(r'^01[3-9]\d{8}$')
+
+# Admin credentials (in production, use environment variables)
+ADMIN_PASSWORD = "hungama"  # Change this in production
+
+# API keys storage: {api_key: {"user": "username", "created": timestamp, "usage_count": 0}}
+api_keys = {}
+
+# Usage statistics
+usage_stats = {
+    "total_otp_requests": 0,
+    "total_otp_verifications": 0,
+    "successful_verifications": 0,
+    "failed_verifications": 0,
+    "api_usage": {}
+}
 
 # --- Utility Functions ---
 
@@ -28,90 +46,122 @@ def is_valid_bd_phone(phone_number):
     """Checks if the phone number is a valid Bangladesh format."""
     return BD_PHONE_REGEX.match(phone_number) is not None
 
-# --- Web Frontend Routes ---
+def generate_api_key():
+    """Generates a secure API key."""
+    return secrets.token_urlsafe(32)
 
-@app.route('/')
-def index():
-    """Main homepage with OTP request and verification forms."""
-    message = request.args.get('message', '')
-    return render_template_string('''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>OTP Test Server</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body { font-family: sans-serif; margin: 20px; }
-                form { margin-bottom: 30px; padding: 20px; border: 1px solid #ccc; border-radius: 8px; max-width: 400px; }
-                input[type="text"], button { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ddd; box-sizing: border-box; }
-                button { background-color: #4CAF50; color: white; border: none; cursor: pointer; }
-                button:hover { opacity: 0.9; }
-                .message { padding: 10px; border-radius: 4px; margin-top: 10px; }
-                .success { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
-                .error { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; }
-                h2 { color: #333; }
-            </style>
-        </head>
-        <body>
-            <h2>Request OTP</h2>
-            <form action="/request_otp" method="post">
-                <label for="phone_request">Phone Number (e.g., 01712345678):</label><br>
-                <input type="text" id="phone_request" name="phone" placeholder="01XXXXXXXXX" required pattern="^01[3-9]\\d{8}$" title="Must be a valid Bangladesh phone number (01X XXXXXXXX)"><br>
-                <button type="submit">Request OTP</button>
-            </form>
+def hash_password(password):
+    """Hash password for storage."""
+    return hashlib.sha256(password.encode()).hexdigest()
 
-            <h2>Verify OTP</h2>
-            <form action="/verify_otp" method="post">
-                <label for="phone_verify">Phone Number:</label><br>
-                <input type="text" id="phone_verify" name="phone" placeholder="01XXXXXXXXX" required pattern="^01[3-9]\\d{8}$" title="Must be a valid Bangladesh phone number (01X XXXXXXXX)"><br>
-                <label for="otp_verify">OTP:</label><br>
-                <input type="text" id="otp_verify" name="otp" required><br>
-                <button type="submit">Verify OTP</button>
-            </form>
+def verify_api_key(api_key):
+    """Verify if API key exists and is valid."""
+    return api_key in api_keys
 
-            {% if message %}
-                <p class="message {{ 'success' if 'Success' in message else 'error' }}">{{ message }}</p>
-            {% endif %}
-        </body>
-        </html>
-    ''', message=message)
+def update_api_usage(api_key):
+    """Update usage statistics for API key."""
+    if api_key in api_keys:
+        api_keys[api_key]["usage_count"] += 1
+        usage_stats["api_usage"][api_key] = usage_stats["api_usage"].get(api_key, 0) + 1
 
-@app.route('/request_otp', methods=['POST'])
-def request_otp_web():
-    """Handles OTP request from the web frontend."""
-    phone = request.form['phone']
-    if not is_valid_bd_phone(phone):
-        return redirect(url_for('index', message='Error: Invalid Bangladesh phone number format.'))
+# --- API Routes ---
 
-    otp_code = generate_otp()
+@app.route('/api/generate_otp', methods=['POST'])
+def api_generate_otp():
+    """
+    API endpoint for external servers to generate OTP.
+    Requires API key authentication.
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not api_key or not verify_api_key(api_key):
+        return jsonify({"error": "Invalid or missing API key"}), 401
+    
+    # Get request data
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    phone_number = data.get('phone_number')
+    otp_code = data.get('otp_code')
+    
+    # Validate phone number
+    if not phone_number or not is_valid_bd_phone(phone_number):
+        return jsonify({"error": "Invalid Bangladesh phone number format"}), 400
+    
+    # Validate OTP code (must be provided by user server)
+    if not otp_code or not otp_code.isdigit() or len(otp_code) != 6:
+        return jsonify({"error": "Invalid OTP code. Must be 6 digits"}), 400
+    
+    # Store OTP
     expiry_time = time.time() + OTP_EXPIRY_SECONDS
-    otp_store[phone] = (otp_code, expiry_time)
+    otp_store[phone_number] = (otp_code, expiry_time)
+    
+    # Add to pending sends queue
+    pending_otp_sends.put({'phone_number': phone_number, 'otp_code': otp_code})
+    
+    # Update statistics
+    usage_stats["total_otp_requests"] += 1
+    update_api_usage(api_key)
+    
+    print(f"API: Generated OTP {otp_code} for {phone_number} via API. Added to send queue.")
+    
+    return jsonify({
+        "success": True,
+        "message": f"OTP {otp_code} generated for {phone_number}",
+        "phone_number": phone_number,
+        "otp_code": otp_code,
+        "expires_in": OTP_EXPIRY_SECONDS
+    })
 
-    # Add this OTP request to the queue for the MicroPython device to pick up
-    pending_otp_sends.put({'phone_number': phone, 'otp_code': otp_code})
-
-    print(f"Server: Generated OTP {otp_code} for {phone}. Added to send queue.")
-    return redirect(url_for('index', message=f'Success: OTP requested for {phone}. Check your device console for send status.'))
-
-@app.route('/verify_otp', methods=['POST'])
-def verify_otp_web():
-    """Handles OTP verification from the web frontend."""
-    phone = request.form['phone']
-    otp_input = request.form['otp']
-
-    if not is_valid_bd_phone(phone):
-        return redirect(url_for('index', message='Error: Invalid Bangladesh phone number format.'))
-
-    otp_record = otp_store.get(phone)
-
+@app.route('/api/verify_otp', methods=['POST'])
+def api_verify_otp():
+    """
+    API endpoint for external servers to verify OTP.
+    Requires API key authentication.
+    """
+    # Check API key
+    api_key = request.headers.get('X-API-Key')
+    if not api_key or not verify_api_key(api_key):
+        return jsonify({"error": "Invalid or missing API key"}), 401
+    
+    # Get request data
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    phone_number = data.get('phone_number')
+    otp_input = data.get('otp_code')
+    
+    # Validate inputs
+    if not phone_number or not is_valid_bd_phone(phone_number):
+        return jsonify({"error": "Invalid Bangladesh phone number format"}), 400
+    
+    if not otp_input:
+        return jsonify({"error": "OTP code is required"}), 400
+    
+    # Update statistics
+    usage_stats["total_otp_verifications"] += 1
+    update_api_usage(api_key)
+    
+    # Verify OTP
+    otp_record = otp_store.get(phone_number)
+    
     if otp_record and otp_record[0] == otp_input:
-        if otp_record[1] > time.time(): # Check if OTP is still valid
-            del otp_store[phone] # OTP consumed
-            return redirect(url_for('index', message='Success: OTP Verified!'))
+        if otp_record[1] > time.time():  # Check if OTP is still valid
+            del otp_store[phone_number]  # OTP consumed
+            usage_stats["successful_verifications"] += 1
+            return jsonify({
+                "success": True,
+                "message": "OTP verified successfully",
+                "phone_number": phone_number
+            })
         else:
-            return redirect(url_for('index', message='Error: OTP expired.'))
+            usage_stats["failed_verifications"] += 1
+            return jsonify({"error": "OTP expired"}), 400
     else:
-        return redirect(url_for('index', message='Error: Invalid OTP or phone number.'))
+        usage_stats["failed_verifications"] += 1
+        return jsonify({"error": "Invalid OTP or phone number"}), 400
 
 # --- MicroPython Device API Route ---
 
@@ -130,8 +180,143 @@ def get_pending_otp_send():
             "otp_code": otp_instruction['otp_code']
         })
     else:
-        # print("Server: No pending OTP sends for device.") # Can be noisy
         return jsonify({"send_otp": False})
+
+# --- Admin Routes ---
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin_login():
+    """Admin login page."""
+    if request.method == 'POST':
+        password = request.form.get('password')
+        if password == ADMIN_PASSWORD:
+            return redirect('/admin/dashboard')
+        else:
+            return render_admin_template('''
+                <h2>Admin Login</h2>
+                <form method="post">
+                    <input type="password" name="password" placeholder="Password" required><br><br>
+                    <button type="submit">Login</button>
+                </form>
+                <p style="color: red;">Invalid password</p>
+            ''')
+    
+    return render_admin_template('''
+        <h2>Admin Login</h2>
+        <form method="post">
+            <input type="password" name="password" placeholder="Password" required><br><br>
+            <button type="submit">Login</button>
+        </form>
+    ''')
+
+@app.route('/admin/dashboard')
+def admin_dashboard():
+    """Admin dashboard with statistics and API key management."""
+    return render_admin_template(f'''
+        <h2>Admin Dashboard</h2>
+        
+        <h3>Usage Statistics</h3>
+        <table border="1" style="border-collapse: collapse; width: 100%;">
+            <tr><td>Total OTP Requests</td><td>{usage_stats["total_otp_requests"]}</td></tr>
+            <tr><td>Total OTP Verifications</td><td>{usage_stats["total_otp_verifications"]}</td></tr>
+            <tr><td>Successful Verifications</td><td>{usage_stats["successful_verifications"]}</td></tr>
+            <tr><td>Failed Verifications</td><td>{usage_stats["failed_verifications"]}</td></tr>
+        </table>
+        
+        <h3>API Keys</h3>
+        <table border="1" style="border-collapse: collapse; width: 100%;">
+            <tr>
+                <th>API Key</th>
+                <th>User</th>
+                <th>Created</th>
+                <th>Usage Count</th>
+            </tr>
+            {''.join([f'''
+            <tr>
+                <td>{api_key[:20]}...</td>
+                <td>{details["user"]}</td>
+                <td>{datetime.fromtimestamp(details["created"]).strftime('%Y-%m-%d %H:%M:%S')}</td>
+                <td>{details["usage_count"]}</td>
+            </tr>
+            ''' for api_key, details in api_keys.items()])}
+        </table>
+        
+        <h3>Create New API Key</h3>
+        <form action="/admin/create_api_key" method="post">
+            <input type="text" name="username" placeholder="Username" required><br><br>
+            <button type="submit">Create API Key</button>
+        </form>
+        
+        <h3>Documentation</h3>
+        <div style="background: #f5f5f5; padding: 15px; border-radius: 5px;">
+            <h4>API Endpoints:</h4>
+            <p><strong>POST /api/generate_otp</strong> - Generate OTP</p>
+            <p><strong>POST /api/verify_otp</strong> - Verify OTP</p>
+            <p><strong>GET /get_pending_otp_send</strong> - Get pending OTP for device</p>
+            
+            <h4>Headers Required:</h4>
+            <p><code>X-API-Key: your_api_key</code></p>
+            <p><code>Content-Type: application/json</code></p>
+            
+            <h4>Request Format:</h4>
+            <p>Generate OTP: {{"phone_number": "01712345678", "otp_code": "123456"}}</p>
+            <p>Verify OTP: {{"phone_number": "01712345678", "otp_code": "123456"}}</p>
+        </div>
+    ''')
+
+@app.route('/admin/create_api_key', methods=['POST'])
+def create_api_key():
+    """Create a new API key."""
+    username = request.form.get('username')
+    if not username:
+        return redirect('/admin/dashboard')
+    
+    api_key = generate_api_key()
+    api_keys[api_key] = {
+        "user": username,
+        "created": time.time(),
+        "usage_count": 0
+    }
+    
+    return render_admin_template(f'''
+        <h2>API Key Created</h2>
+        <p><strong>Username:</strong> {username}</p>
+        <p><strong>API Key:</strong> {api_key}</p>
+        <p><strong>Warning:</strong> Save this API key securely. It won't be shown again.</p>
+        <br>
+        <a href="/admin/dashboard">Back to Dashboard</a>
+    ''')
+
+def render_admin_template(content):
+    """Render admin template with basic styling."""
+    return f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>OTP Server Admin</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            table {{ margin: 10px 0; }}
+            th, td {{ padding: 8px; text-align: left; }}
+            input, button {{ padding: 8px; margin: 5px 0; }}
+            button {{ background-color: #4CAF50; color: white; border: none; cursor: pointer; }}
+            button:hover {{ opacity: 0.8; }}
+        </style>
+    </head>
+    <body>
+        {content}
+    </body>
+    </html>
+    '''
+
+# --- 404 Route ---
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def catch_all(path):
+    """Return 404 for all routes except API and admin routes."""
+    abort(404)
 
 if __name__ == '__main__':
     # Set host to '0.0.0.0' to make it accessible from other devices on the network
