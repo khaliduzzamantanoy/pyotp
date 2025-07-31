@@ -376,7 +376,7 @@ def admin_dashboard():
         
         <h3>Test OTP System</h3>
         <form action="/admin/test_otp" method="post">
-            <input type="text" name="phone_number" placeholder="Phone Number (e.g., 01712345678)" pattern="^01[3-9]\\d{8}$" required><br><br>
+            <input type="text" name="phone_number" placeholder="Phone Number (e.g., 01712345678)" pattern="^01[3-9]\d{8}$" required><br><br>
             <button type="submit">Generate Test OTP</button>
         </form>
         
@@ -672,4 +672,4 @@ def catch_all(path):
 if __name__ == '__main__':
     # Set host to '0.0.0.0' to make it accessible from other devices on the network
     # For production, set debug=False
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
