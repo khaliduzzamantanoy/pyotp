@@ -72,6 +72,10 @@ def check_sms_balance(api_key):
     user_data = api_keys[api_key]
     current_time = time.time()
     
+    # Check if user is banned
+    if user_data.get("banned", False):
+        return False, "User account is banned"
+    
     # Check if balance has expired
     if user_data.get("balance_expiry", 0) < current_time:
         return False, "SMS balance has expired"
@@ -106,6 +110,36 @@ def add_sms_balance(api_key, sms_count, days=30):
             api_keys[api_key]["sms_balance"] += sms_count
             api_keys[api_key]["balance_expiry"] = max(current_expiry, current_time) + (days * 24 * 60 * 60)
         
+        return True
+    return False
+
+def reset_api_key(api_key):
+    """Reset API key usage statistics."""
+    if api_key in api_keys:
+        api_keys[api_key]["usage_count"] = 0
+        return True
+    return False
+
+def ban_user(api_key):
+    """Ban a user by setting their balance to 0 and expiry to past."""
+    if api_key in api_keys:
+        api_keys[api_key]["sms_balance"] = 0
+        api_keys[api_key]["balance_expiry"] = 0
+        api_keys[api_key]["banned"] = True
+        return True
+    return False
+
+def unban_user(api_key):
+    """Unban a user by removing banned flag."""
+    if api_key in api_keys:
+        api_keys[api_key]["banned"] = False
+        return True
+    return False
+
+def delete_user(api_key):
+    """Delete a user completely."""
+    if api_key in api_keys:
+        del api_keys[api_key]
         return True
     return False
 
@@ -286,16 +320,38 @@ def admin_dashboard():
                 <th>SMS Balance</th>
                 <th>Balance Expiry</th>
                 <th>Status</th>
+                <th>Actions</th>
             </tr>
             {''.join([f'''
             <tr>
-                <td>{api_key[:20]}...</td>
+                <td>
+                    <span id="api_key_{api_key[:10]}">{api_key[:20]}...</span>
+                    <button onclick="copyToClipboard('{api_key}')" style="font-size: 10px; padding: 2px 5px;">Copy</button>
+                </td>
                 <td>{details["user"]}</td>
                 <td>{datetime.fromtimestamp(details["created"]).strftime('%Y-%m-%d %H:%M:%S')}</td>
                 <td>{details["usage_count"]}</td>
                 <td>{details.get("sms_balance", 0)}</td>
                 <td>{datetime.fromtimestamp(details.get("balance_expiry", 0)).strftime('%Y-%m-%d %H:%M:%S') if details.get("balance_expiry", 0) > 0 else 'No balance'}</td>
-                <td>{'Active' if details.get("balance_expiry", 0) > time.time() and details.get("sms_balance", 0) > 0 else 'Inactive'}</td>
+                <td>{'Banned' if details.get("banned", False) else ('Active' if details.get("balance_expiry", 0) > time.time() and details.get("sms_balance", 0) > 0 else 'Inactive')}</td>
+                <td>
+                    <form method="post" action="/admin/reset_usage" style="display: inline;">
+                        <input type="hidden" name="api_key" value="{api_key}">
+                        <button type="submit" style="font-size: 10px; padding: 2px 5px; background-color: #ff9800;">Reset</button>
+                    </form>
+                    <form method="post" action="/admin/ban_user" style="display: inline;">
+                        <input type="hidden" name="api_key" value="{api_key}">
+                        <button type="submit" style="font-size: 10px; padding: 2px 5px; background-color: #f44336;">Ban</button>
+                    </form>
+                    <form method="post" action="/admin/unban_user" style="display: inline;">
+                        <input type="hidden" name="api_key" value="{api_key}">
+                        <button type="submit" style="font-size: 10px; padding: 2px 5px; background-color: #4CAF50;">Unban</button>
+                    </form>
+                    <form method="post" action="/admin/delete_user" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete this user? This action cannot be undone.')">
+                        <input type="hidden" name="api_key" value="{api_key}">
+                        <button type="submit" style="font-size: 10px; padding: 2px 5px; background-color: #d32f2f;">Delete</button>
+                    </form>
+                </td>
             </tr>
             ''' for api_key, details in api_keys.items()])}
         </table>
@@ -339,6 +395,24 @@ def admin_dashboard():
             <p>Generate OTP: {{"phone_number": "01712345678", "otp_code": "123456"}}</p>
             <p>Verify OTP: {{"phone_number": "01712345678", "otp_code": "123456"}}</p>
         </div>
+        
+        <script>
+        function copyToClipboard(text) {{
+            navigator.clipboard.writeText(text).then(function() {{
+                alert('API Key copied to clipboard!');
+            }}, function(err) {{
+                console.error('Could not copy text: ', err);
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('API Key copied to clipboard!');
+            }});
+        }}
+        </script>
     ''')
 
 @app.route('/admin/create_api_key', methods=['POST'])
@@ -441,6 +515,128 @@ def test_otp():
         <br>
         <a href="/admin/dashboard">Back to Dashboard</a>
     ''')
+
+@app.route('/admin/reset_usage', methods=['POST'])
+def reset_usage():
+    """Reset API key usage statistics."""
+    api_key = request.form.get('api_key')
+    
+    if not api_key or api_key not in api_keys:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Invalid API key selected.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    
+    if reset_api_key(api_key):
+        user_data = api_keys[api_key]
+        return render_admin_template(f'''
+            <h2>Usage Reset</h2>
+            <p><strong>User:</strong> {user_data["user"]}</p>
+            <p><strong>Status:</strong> Usage count has been reset to 0</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    else:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Failed to reset usage statistics.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+
+@app.route('/admin/ban_user', methods=['POST'])
+def ban_user_route():
+    """Ban a user."""
+    api_key = request.form.get('api_key')
+    
+    if not api_key or api_key not in api_keys:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Invalid API key selected.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    
+    if ban_user(api_key):
+        user_data = api_keys[api_key]
+        return render_admin_template(f'''
+            <h2>User Banned</h2>
+            <p><strong>User:</strong> {user_data["user"]}</p>
+            <p><strong>Status:</strong> User has been banned. They cannot use the API.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    else:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Failed to ban user.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+
+@app.route('/admin/unban_user', methods=['POST'])
+def unban_user_route():
+    """Unban a user."""
+    api_key = request.form.get('api_key')
+    
+    if not api_key or api_key not in api_keys:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Invalid API key selected.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    
+    if unban_user(api_key):
+        user_data = api_keys[api_key]
+        return render_admin_template(f'''
+            <h2>User Unbanned</h2>
+            <p><strong>User:</strong> {user_data["user"]}</p>
+            <p><strong>Status:</strong> User has been unbanned. They can use the API if they have balance.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    else:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Failed to unban user.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+
+@app.route('/admin/delete_user', methods=['POST'])
+def delete_user_route():
+    """Delete a user completely."""
+    api_key = request.form.get('api_key')
+    
+    if not api_key or api_key not in api_keys:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Invalid API key selected.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    
+    user_data = api_keys[api_key]
+    username = user_data["user"]
+    
+    if delete_user(api_key):
+        return render_admin_template(f'''
+            <h2>User Deleted</h2>
+            <p><strong>User:</strong> {username}</p>
+            <p><strong>Status:</strong> User has been completely deleted from the system.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    else:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Failed to delete user.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
 
 def render_admin_template(content):
     """Render admin template with basic styling."""
