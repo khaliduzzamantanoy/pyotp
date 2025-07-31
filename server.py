@@ -24,7 +24,7 @@ BD_PHONE_REGEX = re.compile(r'^01[3-9]\d{8}$')
 # Admin credentials (in production, use environment variables)
 ADMIN_PASSWORD = "hungama"  # Change this in production
 
-# API keys storage: {api_key: {"user": "username", "created": timestamp, "usage_count": 0}}
+# API keys storage: {api_key: {"user": "username", "created": timestamp, "usage_count": 0, "sms_balance": 0, "balance_expiry": timestamp}}
 api_keys = {}
 
 # Usage statistics
@@ -64,6 +64,51 @@ def update_api_usage(api_key):
         api_keys[api_key]["usage_count"] += 1
         usage_stats["api_usage"][api_key] = usage_stats["api_usage"].get(api_key, 0) + 1
 
+def check_sms_balance(api_key):
+    """Check if API key has valid SMS balance."""
+    if api_key not in api_keys:
+        return False, "Invalid API key"
+    
+    user_data = api_keys[api_key]
+    current_time = time.time()
+    
+    # Check if balance has expired
+    if user_data.get("balance_expiry", 0) < current_time:
+        return False, "SMS balance has expired"
+    
+    # Check if balance is available
+    if user_data.get("sms_balance", 0) <= 0:
+        return False, "SMS balance exhausted"
+    
+    return True, "Balance available"
+
+def deduct_sms_balance(api_key):
+    """Deduct one SMS from the balance."""
+    if api_key in api_keys:
+        if api_keys[api_key].get("sms_balance", 0) > 0:
+            api_keys[api_key]["sms_balance"] -= 1
+            return True
+    return False
+
+def add_sms_balance(api_key, sms_count, days=30):
+    """Add SMS balance to an API key."""
+    if api_key in api_keys:
+        current_balance = api_keys[api_key].get("sms_balance", 0)
+        current_expiry = api_keys[api_key].get("balance_expiry", 0)
+        current_time = time.time()
+        
+        # If current balance is expired, start fresh
+        if current_expiry < current_time:
+            api_keys[api_key]["sms_balance"] = sms_count
+            api_keys[api_key]["balance_expiry"] = current_time + (days * 24 * 60 * 60)
+        else:
+            # Extend existing balance
+            api_keys[api_key]["sms_balance"] += sms_count
+            api_keys[api_key]["balance_expiry"] = max(current_expiry, current_time) + (days * 24 * 60 * 60)
+        
+        return True
+    return False
+
 # --- API Routes ---
 
 @app.route('/api/generate_otp', methods=['POST'])
@@ -76,6 +121,11 @@ def api_generate_otp():
     api_key = request.headers.get('X-API-Key')
     if not api_key or not verify_api_key(api_key):
         return jsonify({"error": "Invalid or missing API key"}), 401
+    
+    # Check SMS balance
+    balance_valid, balance_message = check_sms_balance(api_key)
+    if not balance_valid:
+        return jsonify({"error": balance_message}), 402  # Payment Required
     
     # Get request data
     data = request.get_json()
@@ -100,19 +150,22 @@ def api_generate_otp():
     # Add to pending sends queue
     pending_otp_sends.put({'phone_number': phone_number, 'otp_code': otp_code})
     
-    # Update statistics
-    usage_stats["total_otp_requests"] += 1
-    update_api_usage(api_key)
-    
-    print(f"API: Generated OTP {otp_code} for {phone_number} via API. Added to send queue.")
-    
-    return jsonify({
-        "success": True,
-        "message": f"OTP {otp_code} generated for {phone_number}",
-        "phone_number": phone_number,
-        "otp_code": otp_code,
-        "expires_in": OTP_EXPIRY_SECONDS
-    })
+    # Deduct SMS balance and update statistics
+    if deduct_sms_balance(api_key):
+        usage_stats["total_otp_requests"] += 1
+        update_api_usage(api_key)
+        print(f"API: Generated OTP {otp_code} for {phone_number} via API. Added to send queue.")
+        
+        return jsonify({
+            "success": True,
+            "message": f"OTP {otp_code} generated for {phone_number}",
+            "phone_number": phone_number,
+            "otp_code": otp_code,
+            "expires_in": OTP_EXPIRY_SECONDS,
+            "remaining_balance": api_keys[api_key].get("sms_balance", 0)
+        })
+    else:
+        return jsonify({"error": "Failed to deduct SMS balance"}), 500
 
 @app.route('/api/verify_otp', methods=['POST'])
 def api_verify_otp():
@@ -230,6 +283,9 @@ def admin_dashboard():
                 <th>User</th>
                 <th>Created</th>
                 <th>Usage Count</th>
+                <th>SMS Balance</th>
+                <th>Balance Expiry</th>
+                <th>Status</th>
             </tr>
             {''.join([f'''
             <tr>
@@ -237,6 +293,9 @@ def admin_dashboard():
                 <td>{details["user"]}</td>
                 <td>{datetime.fromtimestamp(details["created"]).strftime('%Y-%m-%d %H:%M:%S')}</td>
                 <td>{details["usage_count"]}</td>
+                <td>{details.get("sms_balance", 0)}</td>
+                <td>{datetime.fromtimestamp(details.get("balance_expiry", 0)).strftime('%Y-%m-%d %H:%M:%S') if details.get("balance_expiry", 0) > 0 else 'No balance'}</td>
+                <td>{'Active' if details.get("balance_expiry", 0) > time.time() and details.get("sms_balance", 0) > 0 else 'Inactive'}</td>
             </tr>
             ''' for api_key, details in api_keys.items()])}
         </table>
@@ -244,7 +303,25 @@ def admin_dashboard():
         <h3>Create New API Key</h3>
         <form action="/admin/create_api_key" method="post">
             <input type="text" name="username" placeholder="Username" required><br><br>
+            <input type="number" name="sms_balance" placeholder="Initial SMS Balance" min="0" value="0"><br><br>
             <button type="submit">Create API Key</button>
+        </form>
+        
+        <h3>Manage SMS Balance</h3>
+        <form action="/admin/manage_balance" method="post">
+            <select name="api_key" required>
+                <option value="">Select API Key</option>
+                {''.join([f'<option value="{api_key}">{details["user"]} ({api_key[:20]}...)</option>' for api_key, details in api_keys.items()])}
+            </select><br><br>
+            <input type="number" name="sms_count" placeholder="SMS Count" min="1" required><br><br>
+            <input type="number" name="days" placeholder="Days (default 30)" min="1" value="30"><br><br>
+            <button type="submit">Add SMS Balance</button>
+        </form>
+        
+        <h3>Test OTP System</h3>
+        <form action="/admin/test_otp" method="post">
+            <input type="text" name="phone_number" placeholder="Phone Number (e.g., 01712345678)" pattern="^01[3-9]\\d{8}$" required><br><br>
+            <button type="submit">Generate Test OTP</button>
         </form>
         
         <h3>Documentation</h3>
@@ -268,21 +345,99 @@ def admin_dashboard():
 def create_api_key():
     """Create a new API key."""
     username = request.form.get('username')
+    sms_balance = int(request.form.get('sms_balance', 0))
     if not username:
         return redirect('/admin/dashboard')
     
     api_key = generate_api_key()
+    current_time = time.time()
     api_keys[api_key] = {
         "user": username,
-        "created": time.time(),
-        "usage_count": 0
+        "created": current_time,
+        "usage_count": 0,
+        "sms_balance": sms_balance,
+        "balance_expiry": current_time + (30 * 24 * 60 * 60) if sms_balance > 0 else 0
     }
     
     return render_admin_template(f'''
         <h2>API Key Created</h2>
         <p><strong>Username:</strong> {username}</p>
         <p><strong>API Key:</strong> {api_key}</p>
+        <p><strong>Initial SMS Balance:</strong> {sms_balance}</p>
+        <p><strong>Balance Expiry:</strong> {datetime.fromtimestamp(current_time + (30 * 24 * 60 * 60)).strftime('%Y-%m-%d %H:%M:%S') if sms_balance > 0 else 'No balance'}</p>
         <p><strong>Warning:</strong> Save this API key securely. It won't be shown again.</p>
+        <br>
+        <a href="/admin/dashboard">Back to Dashboard</a>
+    ''')
+
+@app.route('/admin/manage_balance', methods=['POST'])
+def manage_balance():
+    """Manage SMS balance for API keys."""
+    api_key = request.form.get('api_key')
+    sms_count = int(request.form.get('sms_count', 0))
+    days = int(request.form.get('days', 30))
+    
+    if not api_key or api_key not in api_keys:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Invalid API key selected.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    
+    if add_sms_balance(api_key, sms_count, days):
+        user_data = api_keys[api_key]
+        expiry_date = datetime.fromtimestamp(user_data["balance_expiry"]).strftime('%Y-%m-%d %H:%M:%S')
+        
+        return render_admin_template(f'''
+            <h2>SMS Balance Added</h2>
+            <p><strong>User:</strong> {user_data["user"]}</p>
+            <p><strong>SMS Added:</strong> {sms_count}</p>
+            <p><strong>Total Balance:</strong> {user_data["sms_balance"]}</p>
+            <p><strong>Expiry Date:</strong> {expiry_date}</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    else:
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Failed to add SMS balance.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+
+@app.route('/admin/test_otp', methods=['POST'])
+def test_otp():
+    """Generate test OTP for admin testing."""
+    phone_number = request.form.get('phone_number')
+    
+    if not phone_number or not is_valid_bd_phone(phone_number):
+        return render_admin_template('''
+            <h2>Error</h2>
+            <p>Invalid phone number format.</p>
+            <br>
+            <a href="/admin/dashboard">Back to Dashboard</a>
+        ''')
+    
+    # Generate test OTP
+    test_otp_code = generate_otp()
+    expiry_time = time.time() + OTP_EXPIRY_SECONDS
+    otp_store[phone_number] = (test_otp_code, expiry_time)
+    
+    # Add to pending sends queue
+    pending_otp_sends.put({'phone_number': phone_number, 'otp_code': test_otp_code})
+    
+    # Update statistics
+    usage_stats["total_otp_requests"] += 1
+    
+    expiry_date = datetime.fromtimestamp(expiry_time).strftime('%Y-%m-%d %H:%M:%S')
+    
+    return render_admin_template(f'''
+        <h2>Test OTP Generated</h2>
+        <p><strong>Phone Number:</strong> {phone_number}</p>
+        <p><strong>OTP Code:</strong> {test_otp_code}</p>
+        <p><strong>Expires:</strong> {expiry_date}</p>
+        <p><strong>Status:</strong> Added to device queue for SMS sending</p>
         <br>
         <a href="/admin/dashboard">Back to Dashboard</a>
     ''')
