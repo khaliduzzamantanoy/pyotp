@@ -1,0 +1,32 @@
+{% extends "base.html" %} {% block title %}Test OTP Generated - OTP Server{%
+endblock %} {% block content %} {% if success %}
+<h2>Test OTP Generated</h2>
+<div class="alert alert-success">
+  <p>
+    <strong>Note:</strong> This is for testing only. In production, OTP comes
+    from client server.
+  </p>
+  <p><strong>Phone Number:</strong> {{ phone_number }}</p>
+  <p>
+    <strong>OTP Code:</strong>
+    <code
+      style="
+        background: #e0e0e0;
+        padding: 5px 10px;
+        border-radius: 3px;
+        font-size: 18px;
+      "
+      >{{ otp_code }}</code
+    >
+  </p>
+  <p><strong>Expires:</strong> {{ expiry_date }}</p>
+  <p><strong>Status:</strong> SMS sent successfully</p>
+</div>
+{% else %}
+<h2>Error</h2>
+<div class="alert alert-error">
+  <p>{{ error_message }}</p>
+</div>
+{% endif %}
+<a href="/admin/dashboard" class="back-link">← Back to Dashboard</a>
+{% endblock %}

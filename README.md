@@ -12,6 +12,9 @@ This OTP (One-Time Password) server provides API endpoints for generating and ve
 - **Admin Dashboard**: Monitor usage and manage API keys
 - **API Key Authentication**: Secure access control
 - **Usage Statistics**: Track API usage and success rates
+- **SMS Balance Management**: Set and manage SMS limits per user
+- **Balance Expiry**: Automatic expiry after 30 days (configurable)
+- **Test OTP System**: Admin can generate test OTPs for testing
 
 ## Server Setup
 
@@ -59,7 +62,8 @@ Content-Type: application/json
   "message": "OTP 123456 generated for 01712345678",
   "phone_number": "01712345678",
   "otp_code": "123456",
-  "expires_in": 120
+  "expires_in": 120,
+  "remaining_balance": 499
 }
 ```
 
@@ -68,6 +72,22 @@ Content-Type: application/json
 ```json
 {
   "error": "Invalid Bangladesh phone number format"
+}
+```
+
+**Response (Insufficient Balance):**
+
+```json
+{
+  "error": "SMS balance exhausted"
+}
+```
+
+**Response (User Banned):**
+
+```json
+{
+  "error": "User account is banned"
 }
 ```
 
@@ -153,8 +173,30 @@ Visit `http://your-server:5000/admin` and login with the admin password.
    - View existing API keys
    - Create new API keys
    - Track usage per API key
+   - SMS balance management
+   - Balance expiry tracking
 
-3. **Documentation**
+3. **SMS Balance Management**
+
+   - Add SMS balance to users
+   - Set balance expiry (default 30 days)
+   - View remaining balance
+   - Monitor balance status
+
+4. **Test OTP System**
+
+   - Generate test OTPs for testing
+   - Admin-only testing interface
+   - Direct SMS queue integration
+
+5. **User Management**
+
+   - Copy API keys to clipboard
+   - Reset usage statistics
+   - Ban/unban users
+   - Delete users completely
+
+6. **Documentation**
    - Built-in API documentation
    - Request/response examples
 
@@ -165,8 +207,32 @@ Visit `http://your-server:5000/admin` and login with the admin password.
 1. Access the admin dashboard at `/admin`
 2. Login with admin password
 3. Enter a username for the new API key
-4. Click "Create API Key"
-5. Save the generated API key securely
+4. Set initial SMS balance (optional)
+5. Click "Create API Key"
+6. Save the generated API key securely
+
+### SMS Balance Management
+
+Each API key has an associated SMS balance that:
+
+- Expires after 30 days (configurable)
+- Is deducted for each OTP generation
+- Can be topped up by admin
+- Prevents API usage when exhausted
+
+**To add SMS balance:**
+
+1. Go to admin dashboard
+2. Select "Manage SMS Balance"
+3. Choose API key from dropdown
+4. Enter SMS count and expiry days
+5. Click "Add SMS Balance"
+
+**Balance Status:**
+
+- **Active**: Balance available and not expired
+- **Inactive**: Balance exhausted or expired
+- **Banned**: User account is banned (cannot use API)
 
 ### Using API Keys
 
@@ -196,12 +262,14 @@ The server validates Bangladesh phone numbers using the following format:
 
 ## Error Codes
 
-| Status Code | Description                    |
-| ----------- | ------------------------------ |
-| 200         | Success                        |
-| 400         | Bad Request (invalid data)     |
-| 401         | Unauthorized (invalid API key) |
-| 404         | Not Found                      |
+| Status Code | Description                             |
+| ----------- | --------------------------------------- |
+| 200         | Success                                 |
+| 400         | Bad Request (invalid data)              |
+| 401         | Unauthorized (invalid API key)          |
+| 402         | Payment Required (insufficient balance) |
+| 403         | Forbidden (user banned)                 |
+| 404         | Not Found                               |
 
 ## MicroPython Device Integration
 

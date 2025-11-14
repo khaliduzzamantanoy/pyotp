@@ -1,0 +1,26 @@
+{% extends "base.html" %} {% block title %}API Key Created - OTP Server{%
+endblock %} {% block content %}
+<h2>API Key Created</h2>
+<div class="alert alert-success">
+  <p><strong>Username:</strong> {{ username }}</p>
+  <p>
+    <strong>API Key:</strong>
+    <code
+      style="
+        background: #e0e0e0;
+        padding: 5px 10px;
+        border-radius: 3px;
+        word-break: break-all;
+      "
+      >{{ api_key }}</code
+    >
+  </p>
+  <p><strong>Initial SMS Balance:</strong> {{ sms_balance }}</p>
+  <p><strong>Balance Expiry:</strong> {{ expiry_date }}</p>
+  <p>
+    <strong style="color: #f44336">Warning:</strong> Save this API key securely.
+    It won't be shown again.
+  </p>
+</div>
+<a href="/admin/dashboard" class="back-link">← Back to Dashboard</a>
+{% endblock %}

@@ -108,6 +108,25 @@ def test_invalid_phone():
     except requests.exceptions.RequestException as e:
         print(f"Error: {e}")
 
+def test_insufficient_balance():
+    """Test with insufficient SMS balance"""
+    print(f"\n=== Testing Insufficient Balance ===")
+    
+    # This test requires an API key with 0 balance
+    # You'll need to create one via admin dashboard first
+    data = {
+        "phone_number": "01712345678",
+        "otp_code": "123456"
+    }
+    
+    try:
+        response = requests.post(f"{SERVER_URL}/api/generate_otp", 
+                               headers=headers, json=data)
+        print(f"Status Code: {response.status_code}")
+        print(f"Response: {json.dumps(response.json(), indent=2)}")
+    except requests.exceptions.RequestException as e:
+        print(f"Error: {e}")
+
 def main():
     """Run all tests"""
     print("OTP Server API Test Script")
@@ -145,6 +164,9 @@ def main():
     
     # Test 7: Invalid phone number
     test_invalid_phone()
+    
+    # Test 8: Insufficient balance
+    test_insufficient_balance()
     
     print("\n" + "=" * 50)
     print("Test completed!")

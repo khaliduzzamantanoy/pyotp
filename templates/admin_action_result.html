@@ -1,0 +1,15 @@
+{% extends "base.html" %} {% block title %}{{ action_title }} - OTP Server{%
+endblock %} {% block content %} {% if success %}
+<h2>{{ action_title }}</h2>
+<div class="alert alert-success">
+  <p><strong>User:</strong> {{ username }}</p>
+  <p><strong>Status:</strong> {{ status_message }}</p>
+</div>
+{% else %}
+<h2>Error</h2>
+<div class="alert alert-error">
+  <p>{{ error_message }}</p>
+</div>
+{% endif %}
+<a href="/admin/dashboard" class="back-link">← Back to Dashboard</a>
+{% endblock %}
