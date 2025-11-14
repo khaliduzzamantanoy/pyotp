@@ -2,3 +2,6 @@ gunicorn
 flask 
 requests
 fastapi
+uvicorn
+python-multipart
+jinja2
